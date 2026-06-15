@@ -14,10 +14,14 @@ from src.config import settings
 from src.db import DriftBottle, init_db, session_scope
 
 
+BOTTLE_THROW_ALIASES = {"丢漂流瓶", "投漂流瓶", "扔瓶子", "丢瓶子"}
+BOTTLE_PICK_ALIASES = {"捞漂流瓶", "拾漂流瓶", "捡瓶子", "捞瓶子"}
+BOTTLE_DELETE_ALIASES = {"删漂流瓶"}
+
 bottle_cmd = on_command("bottle", aliases={"漂流瓶"}, priority=20, block=True)
-throw_bottle_cmd = on_command("扔漂流瓶", priority=20, block=True)
-pick_bottle_cmd = on_command("捡漂流瓶", priority=20, block=True)
-delete_bottle_cmd = on_command("删除漂流瓶", priority=20, block=True)
+throw_bottle_cmd = on_command("扔漂流瓶", aliases=BOTTLE_THROW_ALIASES, priority=20, block=True)
+pick_bottle_cmd = on_command("捡漂流瓶", aliases=BOTTLE_PICK_ALIASES, priority=20, block=True)
+delete_bottle_cmd = on_command("删除漂流瓶", aliases=BOTTLE_DELETE_ALIASES, priority=20, block=True)
 
 
 def _bottle_dir() -> Path:
@@ -123,11 +127,11 @@ async def _handle_bottle(event: GroupMessageEvent, raw: str, message: Message):
     action, _, payload = raw.partition(" ")
     action = action.lower()
     user_id = str(event.user_id)
-    if action in {"throw", "扔", "add", "添加"}:
+    if action in {"throw", "toss", "扔", "丢", "投", "add", "添加"}:
         return await _save_bottle(event, message, payload)
-    if action in {"pick", "捡", "random", "随机"}:
+    if action in {"pick", "捡", "捞", "拾", "random", "随机"}:
         return await _pick_bottle()
-    if action in {"delete", "删除"}:
+    if action in {"delete", "删除", "删"}:
         if not _is_admin(user_id):
             return "只有 bot 管理员可以删除漂流瓶。"
         target = payload.strip()
@@ -142,7 +146,7 @@ async def _handle_bottle(event: GroupMessageEvent, raw: str, message: Message):
         if str(path) != "." and path.exists():
             os.remove(path)
         return f"已删除漂流瓶 #{target}。"
-    return "用法：/扔漂流瓶，按提示发送文字或图片；/捡漂流瓶；/删除漂流瓶 ID（管理员）"
+    return "用法：/扔漂流瓶 或 /丢漂流瓶，按提示发送文字或图片；/捡漂流瓶 或 /捞漂流瓶；/删除漂流瓶 ID（管理员）"
 
 
 @bottle_cmd.handle()
@@ -150,7 +154,7 @@ async def handle_bottle(event: GroupMessageEvent, state: T_State, args: Message 
     raw = args.extract_plain_text().strip()
     action = raw.split(maxsplit=1)[0].lower() if raw else ""
     payload = raw.split(maxsplit=1)[1:] if raw else []
-    if action in {"throw", "扔", "add", "添加"} and not _image_urls(args) and not payload:
+    if action in {"throw", "toss", "扔", "丢", "投", "add", "添加"} and not _image_urls(args) and not payload:
         await bottle_cmd.send("请发送漂流瓶内容")
         state["waiting_bottle"] = True
         return
