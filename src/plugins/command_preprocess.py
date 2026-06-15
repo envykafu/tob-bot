@@ -5,6 +5,9 @@ from nonebot.message import event_preprocessor
 DIRECT_COMMANDS = {
     "help",
     "帮助",
+    "readme",
+    "说明",
+    "命令说明",
     "todo",
     "course",
     "课表",
