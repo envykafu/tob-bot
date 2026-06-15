@@ -1,0 +1,17 @@
+services:
+  qq-bot:
+    build: .
+    container_name: qq-bot-v1
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8080
+      BOT_DB_PATH: /app/data/bot.db
+      BOT_TIMEZONE: Asia/Shanghai
+      BLACK_HISTORY_DIR: /app/data/black_history
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
