@@ -120,6 +120,8 @@ def _find_todo(session, group_id: str, user_id: str, target: str):
         todo = session.scalar(
             select(Todo).where(Todo.id == int(target), Todo.group_id == group_id, Todo.user_id == user_id)
         )
+        if todo is None:
+            return None, f"没有找到 todo #{target}，或它不属于你。"
         return todo, None
     todos = session.scalars(
         select(Todo).where(

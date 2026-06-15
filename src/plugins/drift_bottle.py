@@ -1,9 +1,7 @@
-import base64
 import os
 import secrets
 from pathlib import Path
 
-import httpx
 from nonebot import on_command
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageSegment
 from nonebot.params import CommandArg
@@ -12,6 +10,7 @@ from sqlalchemy import func, select
 
 from src.config import settings
 from src.db import DriftBottle, init_db, session_scope
+from src.image_utils import download_image, read_image_base64
 
 
 BOTTLE_THROW_ALIASES = {"丢漂流瓶", "投漂流瓶", "扔瓶子", "丢瓶子"}
@@ -45,13 +44,6 @@ def _plain_text(message: Message) -> str:
     return message.extract_plain_text().strip()
 
 
-async def _download_image(url: str, dest: Path) -> None:
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-        response = await client.get(url)
-        response.raise_for_status()
-    dest.write_bytes(response.content)
-
-
 def _is_admin(user_id: str) -> bool:
     return user_id in set(settings.superusers)
 
@@ -64,36 +56,48 @@ async def _save_bottle(event: GroupMessageEvent, message: Message, text_override
     if not urls and not text:
         return "没有收到漂流瓶内容，已取消。"
 
+    downloaded_paths: list[Path] = []
+    bottle_dir = _bottle_dir()
+    for url in urls:
+        filename = f"{group_id}_{user_id}_{secrets.token_hex(8)}.jpg"
+        path = bottle_dir / filename
+        try:
+            await download_image(url, path)
+        except Exception as exc:
+            for downloaded_path in downloaded_paths:
+                downloaded_path.unlink(missing_ok=True)
+            return f"漂流瓶图片保存失败：{exc}"
+        downloaded_paths.append(path)
+
     saved = 0
-    with session_scope() as session:
-        for url in urls:
-            filename = f"{group_id}_{user_id}_{secrets.token_hex(8)}.jpg"
-            path = _bottle_dir() / filename
-            try:
-                await _download_image(url, path)
-            except Exception as exc:
-                return f"漂流瓶图片保存失败：{exc}"
-            session.add(
-                DriftBottle(
-                    group_id=group_id,
-                    user_id=user_id,
-                    content_type="image",
-                    content="",
-                    file_path=str(path),
+    try:
+        with session_scope() as session:
+            for path in downloaded_paths:
+                session.add(
+                    DriftBottle(
+                        group_id=group_id,
+                        user_id=user_id,
+                        content_type="image",
+                        content="",
+                        file_path=str(path),
+                    )
                 )
-            )
-            saved += 1
-        if text:
-            session.add(
-                DriftBottle(
-                    group_id=group_id,
-                    user_id=user_id,
-                    content_type="text",
-                    content=text,
-                    file_path="",
+                saved += 1
+            if text:
+                session.add(
+                    DriftBottle(
+                        group_id=group_id,
+                        user_id=user_id,
+                        content_type="text",
+                        content=text,
+                        file_path="",
+                    )
                 )
-            )
-            saved += 1
+                saved += 1
+    except Exception as exc:
+        for downloaded_path in downloaded_paths:
+            downloaded_path.unlink(missing_ok=True)
+        return f"漂流瓶保存失败：{exc}"
     return f"已扔出 {saved} 个漂流瓶。"
 
 
@@ -105,7 +109,10 @@ def _format_bottle(item: DriftBottle):
     if not path.exists():
         return "捡到的漂流瓶图片文件不存在，可能被手动删除了。"
     item.picked_count += 1
-    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    try:
+        encoded = read_image_base64(path)
+    except Exception as exc:
+        return f"捡到的漂流瓶图片无法发送：{exc}"
     return MessageSegment.image(f"base64://{encoded}")
 
 

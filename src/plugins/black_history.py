@@ -1,9 +1,7 @@
-import os
 import secrets
-import base64
+import os
 from pathlib import Path
 
-import httpx
 from nonebot import on_command
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageSegment
 from nonebot.params import CommandArg
@@ -12,6 +10,7 @@ from sqlalchemy import delete, func, select
 
 from src.config import settings
 from src.db import BlackHistory, init_db, session_scope
+from src.image_utils import download_image, read_image_base64
 
 
 black_cmd = on_command("black", aliases={"黑历史"}, priority=20, block=True)
@@ -35,13 +34,6 @@ def _plain_text(message: Message) -> str:
     return message.extract_plain_text().strip()
 
 
-async def _download_image(url: str, dest: Path) -> None:
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-        response = await client.get(url)
-        response.raise_for_status()
-    dest.write_bytes(response.content)
-
-
 def _is_admin(user_id: str) -> bool:
     return user_id in set(settings.superusers)
 
@@ -55,36 +47,47 @@ async def _save_black_history(event: GroupMessageEvent, message: Message):
         return "没有收到图片或文字，已取消添加。"
 
     settings.black_history_dir.mkdir(parents=True, exist_ok=True)
+    downloaded_paths: list[Path] = []
+    for url in urls:
+        filename = f"{group_id}_{user_id}_{secrets.token_hex(8)}.jpg"
+        path = settings.black_history_dir / filename
+        try:
+            await download_image(url, path)
+        except Exception as exc:
+            for downloaded_path in downloaded_paths:
+                downloaded_path.unlink(missing_ok=True)
+            return f"图片保存失败：{exc}"
+        downloaded_paths.append(path)
+
     saved = 0
-    with session_scope() as session:
-        for url in urls:
-            filename = f"{group_id}_{user_id}_{secrets.token_hex(8)}.jpg"
-            path = settings.black_history_dir / filename
-            try:
-                await _download_image(url, path)
-            except Exception as exc:
-                return f"图片保存失败：{exc}"
-            session.add(
-                BlackHistory(
-                    group_id=group_id,
-                    user_id=user_id,
-                    content_type="image",
-                    content="",
-                    file_path=str(path),
+    try:
+        with session_scope() as session:
+            for path in downloaded_paths:
+                session.add(
+                    BlackHistory(
+                        group_id=group_id,
+                        user_id=user_id,
+                        content_type="image",
+                        content="",
+                        file_path=str(path),
+                    )
                 )
-            )
-            saved += 1
-        if text:
-            session.add(
-                BlackHistory(
-                    group_id=group_id,
-                    user_id=user_id,
-                    content_type="text",
-                    content=text,
-                    file_path="",
+                saved += 1
+            if text:
+                session.add(
+                    BlackHistory(
+                        group_id=group_id,
+                        user_id=user_id,
+                        content_type="text",
+                        content=text,
+                        file_path="",
+                    )
                 )
-            )
-            saved += 1
+                saved += 1
+    except Exception as exc:
+        for downloaded_path in downloaded_paths:
+            downloaded_path.unlink(missing_ok=True)
+        return f"黑历史保存失败：{exc}"
     return f"已保存 {saved} 条黑历史。"
 
 
@@ -114,7 +117,10 @@ async def _handle_black(event: GroupMessageEvent, raw: str, message: Message):
         path = Path(item.file_path)
         if not path.exists():
             return "抽到的图片文件不存在，可能被手动删除了。"
-        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        try:
+            encoded = read_image_base64(path)
+        except Exception as exc:
+            return f"抽到的图片无法发送：{exc}"
         return MessageSegment.image(f"base64://{encoded}")
 
     if action in {"delete", "删除"}:

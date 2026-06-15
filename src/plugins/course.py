@@ -52,6 +52,8 @@ def _find_course(session, group_id: str, user_id: str, target: str):
         course = session.scalar(
             select(Course).where(Course.id == int(target), Course.group_id == group_id, Course.user_id == user_id)
         )
+        if course is None:
+            return None, f"没有找到课程 #{target}，或它不属于你。"
         return course, None
     courses = session.scalars(
         select(Course).where(

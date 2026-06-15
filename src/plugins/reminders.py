@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 
 import nonebot
+from nonebot import logger
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import select
 
@@ -21,16 +22,22 @@ def _first_bot():
     return next(iter(bots.values()))
 
 
-async def _send_group(group_id: str, user_id: str, text: str) -> None:
+async def _send_group(group_id: str, user_id: str, text: str) -> bool:
     bot = _first_bot()
     if bot is None:
-        return
-    await bot.send_group_msg(group_id=int(group_id), message=at_user(user_id) + " " + text)
+        logger.warning("Skip reminder because no OneBot connection is available.")
+        return False
+    try:
+        await bot.send_group_msg(group_id=int(group_id), message=at_user(user_id) + " " + text)
+    except Exception as exc:
+        logger.warning(f"Failed to send reminder to group {group_id}: {exc}")
+        return False
+    return True
 
 
 async def remind_todos() -> None:
     current = now_local()
-    messages: list[tuple[str, str, str]] = []
+    messages: list[tuple[str, str, str, int, str]] = []
     with session_scope() as session:
         todos = session.scalars(select(Todo).where(Todo.done.is_(False))).all()
         for todo in todos:
@@ -39,14 +46,14 @@ async def remind_todos() -> None:
                 if pre_due_start <= current < todo.due_at:
                     last_pre_due = todo.last_pre_due_reminded_at
                     if last_pre_due is None or current >= last_pre_due + timedelta(hours=2):
-                        todo.last_pre_due_reminded_at = current
-                        todo.updated_at = current
                         due_text = todo.due_at.strftime("%Y-%m-%d %H:%M")
                         messages.append(
                             (
                                 todo.group_id,
                                 todo.user_id,
                                 f"todo 截止前提醒：#{todo.id} {todo.content}（截止 {due_text}）",
+                                todo.id,
+                                "pre_due",
                             )
                         )
 
@@ -64,13 +71,25 @@ async def remind_todos() -> None:
             if not should_remind:
                 continue
 
-            todo.last_reminded_at = current
-            todo.updated_at = current
             due_text = todo.due_at.strftime("%Y-%m-%d %H:%M") if todo.due_at else "未设置截止时间"
-            messages.append((todo.group_id, todo.user_id, f"todo 提醒：#{todo.id} {todo.content}（{due_text}）"))
+            messages.append((todo.group_id, todo.user_id, f"todo 提醒：#{todo.id} {todo.content}（{due_text}）", todo.id, "due"))
 
-    for group_id, user_id, text in messages:
-        await _send_group(group_id, user_id, text)
+    sent_updates: list[tuple[int, str]] = []
+    for group_id, user_id, text, todo_id, reminder_type in messages:
+        if await _send_group(group_id, user_id, text):
+            sent_updates.append((todo_id, reminder_type))
+    if not sent_updates:
+        return
+    with session_scope() as session:
+        for todo_id, reminder_type in sent_updates:
+            todo = session.get(Todo, todo_id)
+            if todo is None or todo.done:
+                continue
+            if reminder_type == "pre_due":
+                todo.last_pre_due_reminded_at = current
+            else:
+                todo.last_reminded_at = current
+            todo.updated_at = current
 
 
 async def remind_courses() -> None:
@@ -78,7 +97,7 @@ async def remind_courses() -> None:
     date_text = current.strftime("%Y-%m-%d")
     reminder_date = current.strftime("%Y%m%d")
     weekday = current.isoweekday()
-    messages: list[tuple[str, str, str]] = []
+    messages: list[tuple[str, str, str, int, str]] = []
     with session_scope() as session:
         courses = session.scalars(
             select(Course).where(Course.enabled.is_(True), Course.weekday == weekday)
@@ -87,7 +106,7 @@ async def remind_courses() -> None:
         cancelled_days = {(item.group_id, item.user_id) for item in adjustments if item.action == "cancel_day"}
         cancelled_courses = {item.course_id for item in adjustments if item.action == "cancel_course"}
 
-        reminder_items: list[tuple[str, str, str, str, str, str, str, str]] = []
+        reminder_items: list[tuple[str, int, str, str, str, str, str, str, str]] = []
         for course in courses:
             if (course.group_id, course.user_id) in cancelled_days:
                 continue
@@ -104,6 +123,7 @@ async def remind_courses() -> None:
             reminder_items.append(
                 (
                     f"course:{course.id}",
+                    course.id,
                     course.group_id,
                     course.user_id,
                     course.name,
@@ -121,6 +141,7 @@ async def remind_courses() -> None:
             reminder_items.append(
                 (
                     f"adjustment:{item.id}",
+                    item.course_id or 0,
                     item.group_id,
                     item.user_id,
                     item.name,
@@ -131,7 +152,7 @@ async def remind_courses() -> None:
                 )
             )
 
-        for key_prefix, group_id, user_id, name, start_time, end_time, extra, label in reminder_items:
+        for key_prefix, course_id, group_id, user_id, name, start_time, end_time, extra, label in reminder_items:
             start_at = combine_today(start_time, current)
             remind_at = start_at - timedelta(minutes=settings.course_remind_minutes)
             if current < remind_at or current >= start_at:
@@ -140,14 +161,12 @@ async def remind_courses() -> None:
             reminder_key = f"{key_prefix}:{reminder_date}"
             exists = session.scalar(
                 select(CourseReminder).where(
-                    CourseReminder.course_id == 0,
                     CourseReminder.reminder_key == reminder_key,
                 )
             )
             if exists:
                 continue
 
-            session.add(CourseReminder(course_id=0, reminder_key=reminder_key, reminded_at=current))
             suffix = f"（{extra}）" if extra else ""
             prefix = f"{label}上课提醒" if label else "上课提醒"
             messages.append(
@@ -155,17 +174,28 @@ async def remind_courses() -> None:
                     group_id,
                     user_id,
                     f"{prefix}：{settings.course_remind_minutes} 分钟后 {name} 开始，时间 {start_time}-{end_time}{suffix}",
+                    course_id,
+                    reminder_key,
                 )
             )
 
-    for group_id, user_id, text in messages:
-        await _send_group(group_id, user_id, text)
+    sent_reminders: list[tuple[int, str]] = []
+    for group_id, user_id, text, course_id, reminder_key in messages:
+        if await _send_group(group_id, user_id, text):
+            sent_reminders.append((course_id, reminder_key))
+    if not sent_reminders:
+        return
+    with session_scope() as session:
+        for course_id, reminder_key in sent_reminders:
+            exists = session.scalar(select(CourseReminder).where(CourseReminder.reminder_key == reminder_key))
+            if not exists:
+                session.add(CourseReminder(course_id=course_id, reminder_key=reminder_key, reminded_at=current))
 
 
 async def remind_important_schedules() -> None:
     current = now_local()
     today_text = current.strftime("%Y-%m-%d")
-    messages: list[tuple[str, str, str]] = []
+    messages: list[tuple[str, str, str, int]] = []
     with session_scope() as session:
         schedules = session.scalars(
             select(ImportantSchedule).where(ImportantSchedule.enabled.is_(True))
@@ -181,7 +211,6 @@ async def remind_important_schedules() -> None:
             if days_left < 0:
                 schedule.enabled = False
                 continue
-            schedule.last_countdown_date = today_text
             if days_left == 0:
                 countdown = "就是今天"
             else:
@@ -191,11 +220,21 @@ async def remind_important_schedules() -> None:
                     schedule.group_id,
                     schedule.user_id,
                     f"重要日程倒计时：{schedule.title} {countdown}（{schedule.target_date}）",
+                    schedule.id,
                 )
             )
 
-    for group_id, user_id, text in messages:
-        await _send_group(group_id, user_id, text)
+    sent_schedule_ids: list[int] = []
+    for group_id, user_id, text, schedule_id in messages:
+        if await _send_group(group_id, user_id, text):
+            sent_schedule_ids.append(schedule_id)
+    if not sent_schedule_ids:
+        return
+    with session_scope() as session:
+        for schedule_id in sent_schedule_ids:
+            schedule = session.get(ImportantSchedule, schedule_id)
+            if schedule is not None and schedule.enabled:
+                schedule.last_countdown_date = today_text
 
 
 driver = nonebot.get_driver()

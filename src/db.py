@@ -3,7 +3,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterator
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, inspect, text
+from sqlalchemy import Boolean, DateTime, Integer, String, Text, create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from src.config import settings
@@ -55,7 +55,7 @@ class CourseReminder(Base):
     __tablename__ = "course_reminders"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    course_id: Mapped[int] = mapped_column(ForeignKey("courses.id"), index=True)
+    course_id: Mapped[int] = mapped_column(Integer, default=0, index=True)
     reminder_key: Mapped[str] = mapped_column(String(32), index=True)
     reminded_at: Mapped[datetime] = mapped_column(DateTime, default=now_local)
 

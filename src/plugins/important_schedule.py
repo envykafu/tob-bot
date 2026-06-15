@@ -46,6 +46,8 @@ def _find_schedule(session, group_id: str, user_id: str, target: str):
                 ImportantSchedule.user_id == user_id,
             )
         )
+        if schedule is None:
+            return None, f"没有找到重要日程 #{target}，或它不属于你。"
         return schedule, None
     schedules = session.scalars(
         select(ImportantSchedule).where(
