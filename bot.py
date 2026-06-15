@@ -1,7 +1,13 @@
+import sys
+
 import nonebot
 from nonebot.adapters.onebot.v11 import Adapter as OneBotV11Adapter
 
-from src.config import settings
+try:
+    from src.config import settings
+except RuntimeError as exc:
+    print(f"启动失败：{exc}", file=sys.stderr)
+    raise SystemExit(2) from None
 
 
 nonebot.init(

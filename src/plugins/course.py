@@ -4,11 +4,11 @@ from io import StringIO
 from nonebot import on_command
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message
 from nonebot.params import CommandArg
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 
-from src.db import Course, CourseAdjustment, init_db, session_scope
+from src.db import Course, CourseAdjustment, CourseReminder, init_db, session_scope
 from src.time_utils import parse_date_or_today, parse_hhmm
-from src.week_utils import is_week_enabled
+from src.week_utils import is_valid_week_rule
 
 
 course_cmd = on_command("course", aliases={"课表"}, priority=20, block=True)
@@ -33,17 +33,48 @@ def _validate_row(row: dict[str, str], line_no: int) -> tuple[bool, str]:
     if weekday < 1 or weekday > 7:
         return False, f"第 {line_no} 行 weekday 必须是 1-7。"
     try:
-        parse_hhmm(row["start_time"])
-        parse_hhmm(row["end_time"])
+        start_time = parse_hhmm(row["start_time"])
+        end_time = parse_hhmm(row["end_time"])
     except ValueError:
         return False, f"第 {line_no} 行时间必须是 HH:MM，例如 08:00。"
-    if not parse_date_or_today(row["start_date"]) or not parse_date_or_today(row["end_date"]):
+    if end_time <= start_time:
+        return False, f"第 {line_no} 行 end_time 必须晚于 start_time。"
+    start_date = parse_date_or_today(row["start_date"])
+    end_date = parse_date_or_today(row["end_date"])
+    if not start_date or not end_date:
         return False, f"第 {line_no} 行 start_date/end_date 必须是日期，例如 2026-09-01。"
+    if end_date < start_date:
+        return False, f"第 {line_no} 行 end_date 不能早于 start_date。"
     weeks = row.get("weeks", "").strip()
-    if weeks:
-        # week 1 is enough to reject only completely malformed rules.
-        is_week_enabled(weeks, 1)
+    if weeks and not is_valid_week_rule(weeks):
+        return False, f"第 {line_no} 行 weeks 格式不正确，例如 1-16、1-16单周、2-16双周。"
     return True, ""
+
+
+def _clear_course_state(session, group_id: str, user_id: str) -> None:
+    course_ids = session.scalars(
+        select(Course.id).where(Course.group_id == group_id, Course.user_id == user_id)
+    ).all()
+    adjustment_ids = session.scalars(
+        select(CourseAdjustment.id).where(
+            CourseAdjustment.group_id == group_id,
+            CourseAdjustment.user_id == user_id,
+        )
+    ).all()
+    reminder_filters = []
+    reminder_filters.extend(CourseReminder.reminder_key.like(f"course:{course_id}:%") for course_id in course_ids)
+    reminder_filters.extend(
+        CourseReminder.reminder_key.like(f"adjustment:{adjustment_id}:%") for adjustment_id in adjustment_ids
+    )
+    if reminder_filters:
+        session.execute(delete(CourseReminder).where(or_(*reminder_filters)))
+    session.execute(
+        delete(CourseAdjustment).where(
+            CourseAdjustment.group_id == group_id,
+            CourseAdjustment.user_id == user_id,
+        )
+    )
+    session.execute(delete(Course).where(Course.group_id == group_id, Course.user_id == user_id))
 
 
 def _find_course(session, group_id: str, user_id: str, target: str):
@@ -127,7 +158,7 @@ async def _handle_course(event: GroupMessageEvent, raw: str):
         if not imported:
             return "CSV 没有课程数据。"
         with session_scope() as session:
-            session.execute(delete(Course).where(Course.group_id == group_id, Course.user_id == user_id))
+            _clear_course_state(session, group_id, user_id)
             session.add_all(imported)
         return f"已导入 {len(imported)} 门课程，旧课表已替换。"
 
@@ -150,8 +181,8 @@ async def _handle_course(event: GroupMessageEvent, raw: str):
 
     if action in {"clear", "清空"}:
         with session_scope() as session:
-            session.execute(delete(Course).where(Course.group_id == group_id, Course.user_id == user_id))
-        return "已清空你的课程表。"
+            _clear_course_state(session, group_id, user_id)
+        return "已清空你的课程表，并清理了对应调课记录。"
 
     if action in {"cancel", "delete", "删除", "取消"}:
         parts = payload.split()
@@ -193,10 +224,12 @@ async def _handle_course(event: GroupMessageEvent, raw: str):
             return "时间段格式应为 08:00-09:40。"
         start_time, end_time = [item.strip() for item in time_range.split("-", 1)]
         try:
-            parse_hhmm(start_time)
-            parse_hhmm(end_time)
+            start = parse_hhmm(start_time)
+            end = parse_hhmm(end_time)
         except ValueError:
             return "时间格式必须是 HH:MM，例如 08:00。"
+        if end <= start:
+            return "结束时间必须晚于开始时间。"
         name = parts[2]
         location = " ".join(parts[3:])
         with session_scope() as session:
@@ -235,10 +268,12 @@ async def _handle_course(event: GroupMessageEvent, raw: str):
             return "时间段格式应为 10:00-11:40。"
         start_time, end_time = [item.strip() for item in time_range.split("-", 1)]
         try:
-            parse_hhmm(start_time)
-            parse_hhmm(end_time)
+            start = parse_hhmm(start_time)
+            end = parse_hhmm(end_time)
         except ValueError:
             return "时间格式必须是 HH:MM，例如 10:00。"
+        if end <= start:
+            return "结束时间必须晚于开始时间。"
         with session_scope() as session:
             course, error = _find_course(session, group_id, user_id, target)
             if error:

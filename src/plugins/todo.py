@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from src.db import Todo, init_db, session_scope
 from src.time_utils import now_local, parse_datetime, parse_natural_datetime_prefix
-from src.todo_service import add_todo
+from src.todo_service import add_todo, normalize_todo_text, parse_repeat_interval
 
 
 todo_cmd = on_command("todo", priority=20, block=True)
@@ -84,11 +84,11 @@ def _parse_add_payload(payload: str) -> tuple[str, datetime | None, datetime | N
     else:
         due_at, rest = _parse_due_payload(payload)
         content = rest.strip() if due_at else payload.strip()
-    remind_every = None
+    remind_every = parse_repeat_interval(content)
 
     remind_match = None
-    for marker in [" 每", " remind "]:
-        if marker in content:
+    for marker in [" remind "]:
+        if remind_every is None and marker in content:
             before, _, after = content.partition(marker)
             remind_match = after.strip()
             content = before.strip()
@@ -105,6 +105,7 @@ def _parse_add_payload(payload: str) -> tuple[str, datetime | None, datetime | N
         if remind_every < 1:
             return "", None, None, None, None, "提醒间隔必须大于 0。"
 
+    content = normalize_todo_text(content)
     if not content:
         return "", None, None, None, None, "todo 内容不能为空。"
     if start_at and end_at and end_at < start_at:
@@ -164,6 +165,18 @@ def _format_todo_time(todo: Todo) -> str:
     return "无截止时间"
 
 
+def _format_added_todo_time(due_at: datetime | None, start_at: datetime | None, end_at: datetime | None) -> str:
+    if start_at and end_at:
+        if start_at.date() == end_at.date():
+            return f"{start_at:%Y-%m-%d %H:%M}-{end_at:%H:%M}"
+        return f"{start_at:%Y-%m-%d %H:%M} 至 {end_at:%Y-%m-%d %H:%M}"
+    if start_at:
+        return f"开始 {start_at:%Y-%m-%d %H:%M}"
+    if due_at:
+        return f"截止 {due_at:%Y-%m-%d %H:%M}"
+    return "无截止时间，不会触发到点提醒"
+
+
 @todo_cmd.handle()
 async def handle_todo(event: GroupMessageEvent, args: Message = CommandArg()):
     init_db()
@@ -181,7 +194,9 @@ async def handle_todo(event: GroupMessageEvent, args: Message = CommandArg()):
         if error:
             await todo_cmd.finish(error)
         todo_id = add_todo(group_id, user_id, content, due_at, remind_every, start_at, end_at)
-        await todo_cmd.finish(f"已添加 todo #{todo_id}。")
+        time_text = _format_added_todo_time(due_at, start_at, end_at)
+        interval = _format_interval(remind_every)
+        await todo_cmd.finish(f"已添加 todo #{todo_id}：{content}（{time_text}{interval}）。")
 
     if action == "list":
         with session_scope() as session:

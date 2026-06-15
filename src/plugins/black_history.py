@@ -38,26 +38,61 @@ def _is_admin(user_id: str) -> bool:
     return user_id in set(settings.superusers)
 
 
-async def _save_black_history(event: GroupMessageEvent, message: Message):
+def _is_group_manager(event: GroupMessageEvent) -> bool:
+    sender = getattr(event, "sender", None)
+    role = getattr(sender, "role", "") if sender is not None else ""
+    return role in {"owner", "admin"}
+
+
+def _can_delete_black_history(event: GroupMessageEvent, item: BlackHistory) -> bool:
+    return _is_admin(str(event.user_id)) or _is_group_manager(event) or item.user_id == str(event.user_id)
+
+
+def _format_black_history_item(item: BlackHistory) -> str:
+    if item.content_type == "text":
+        preview = item.content.replace("\n", " ").strip()
+        if len(preview) > 30:
+            preview = preview[:30] + "..."
+        return f"#{item.id} 文本 {preview}"
+    return f"#{item.id} 图片"
+
+
+async def _save_black_history(event: GroupMessageEvent, message: Message, text_override: str | None = None):
     group_id = str(event.group_id)
     user_id = str(event.user_id)
     urls = _image_urls(message)
-    text = _plain_text(message)
+    text = (text_override if text_override is not None else _plain_text(message)).strip()
     if not urls and not text:
         return "没有收到图片或文字，已取消添加。"
 
-    settings.black_history_dir.mkdir(parents=True, exist_ok=True)
+    incoming_count = len(urls) + (1 if text else 0)
+    with session_scope() as session:
+        group_count = session.scalar(
+            select(func.count()).select_from(BlackHistory).where(BlackHistory.group_id == group_id)
+        ) or 0
+        user_count = session.scalar(
+            select(func.count())
+            .select_from(BlackHistory)
+            .where(BlackHistory.group_id == group_id, BlackHistory.user_id == user_id)
+        ) or 0
+    if int(group_count) + incoming_count > settings.black_history_max_per_group:
+        return f"本群黑历史已达到上限 {settings.black_history_max_per_group} 条，请先删除旧记录。"
+    if int(user_count) + incoming_count > settings.black_history_max_per_user:
+        return f"你的黑历史已达到上限 {settings.black_history_max_per_user} 条，请先删除旧记录。"
+
     downloaded_paths: list[Path] = []
-    for url in urls:
-        filename = f"{group_id}_{user_id}_{secrets.token_hex(8)}.jpg"
-        path = settings.black_history_dir / filename
-        try:
-            await download_image(url, path)
-        except Exception as exc:
-            for downloaded_path in downloaded_paths:
-                downloaded_path.unlink(missing_ok=True)
-            return f"图片保存失败：{exc}"
-        downloaded_paths.append(path)
+    if urls:
+        settings.black_history_dir.mkdir(parents=True, exist_ok=True)
+        for url in urls:
+            filename = f"{group_id}_{user_id}_{secrets.token_hex(8)}.jpg"
+            path = settings.black_history_dir / filename
+            try:
+                await download_image(url, path)
+            except Exception as exc:
+                for downloaded_path in downloaded_paths:
+                    downloaded_path.unlink(missing_ok=True)
+                return f"图片保存失败：{exc}"
+            downloaded_paths.append(path)
 
     saved = 0
     try:
@@ -99,7 +134,7 @@ async def _handle_black(event: GroupMessageEvent, raw: str, message: Message):
     user_id = str(event.user_id)
 
     if action in {"add", "upload", "上传"}:
-        return await _save_black_history(event, message)
+        return await _save_black_history(event, message, payload.strip())
 
     if action in {"random", "随机"}:
         with session_scope() as session:
@@ -113,35 +148,49 @@ async def _handle_black(event: GroupMessageEvent, raw: str, message: Message):
         if item is None:
             return "这个群还没有黑历史。"
         if item.content_type == "text":
-            return item.content
+            return f"黑历史 #{item.id}：{item.content}"
         path = Path(item.file_path)
         if not path.exists():
-            return "抽到的图片文件不存在，可能被手动删除了。"
+            return f"抽到的图片文件不存在（#{item.id}），可能被手动删除了。"
         try:
             encoded = read_image_base64(path)
         except Exception as exc:
-            return f"抽到的图片无法发送：{exc}"
-        return MessageSegment.image(f"base64://{encoded}")
+            return f"抽到的图片 #{item.id} 无法发送：{exc}"
+        return MessageSegment.text(f"黑历史 #{item.id}：\n") + MessageSegment.image(f"base64://{encoded}")
+
+    if action in {"list", "列表"}:
+        with session_scope() as session:
+            items = session.scalars(
+                select(BlackHistory)
+                .where(BlackHistory.group_id == group_id)
+                .order_by(BlackHistory.id.desc())
+                .limit(10)
+            ).all()
+        if not items:
+            return "这个群还没有黑历史。"
+        lines = ["最近 10 条黑历史："]
+        lines.extend(_format_black_history_item(item) for item in items)
+        return "\n".join(lines)
 
     if action in {"delete", "删除"}:
-        if not _is_admin(user_id):
-            return "只有 bot 管理员可以删除黑历史。"
         target = payload.strip()
         if not target.isdigit():
-            return "用法：/删除黑历史 图片ID"
+            return "用法：/删除黑历史 ID"
         with session_scope() as session:
             item = session.scalar(
                 select(BlackHistory).where(BlackHistory.id == int(target), BlackHistory.group_id == group_id)
             )
             if item is None:
                 return "没有找到这条黑历史。"
+            if not _can_delete_black_history(event, item):
+                return "只有记录创建者、群管理员或 bot 管理员可以删除黑历史。"
             path = Path(item.file_path)
             session.delete(item)
         if str(path) != "." and path.exists():
             os.remove(path)
         return f"已删除黑历史 #{target}。"
 
-    return "用法：/添加黑历史，按提示发送图片或文字；/随机黑历史；/删除黑历史 图片ID（管理员）"
+    return "用法：/添加黑历史，按提示发送图片或文字；/随机黑历史；/黑历史 list；/删除黑历史 ID"
 
 
 @black_cmd.handle()

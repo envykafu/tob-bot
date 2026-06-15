@@ -13,6 +13,9 @@ from src.week_utils import is_week_enabled, week_number_for
 
 
 scheduler = AsyncIOScheduler(timezone=TZ)
+DAY_BASED_TODO_REMIND_HOUR = 8
+COURSE_REMINDER_LATE_GRACE_MINUTES = 30
+IMPORTANT_SCHEDULE_REMIND_HOUR = 8
 
 
 def _first_bot():
@@ -35,15 +38,35 @@ async def _send_group(group_id: str, user_id: str, text: str) -> bool:
     return True
 
 
+def _should_send_interval_reminder(todo: Todo, current) -> bool:
+    if not todo.remind_every_minutes:
+        return False
+
+    interval = timedelta(minutes=todo.remind_every_minutes)
+    if todo.remind_every_minutes >= 1440 and todo.remind_every_minutes % 1440 == 0:
+        if current.hour < DAY_BASED_TODO_REMIND_HOUR:
+            return False
+        days = todo.remind_every_minutes // 1440
+        last_date = todo.last_reminded_at.date() if todo.last_reminded_at else todo.created_at.date()
+        if current.date() == last_date:
+            return False
+        return current.date() >= last_date + timedelta(days=days)
+
+    base = todo.last_reminded_at or todo.created_at
+    return current >= base + interval
+
+
 async def remind_todos() -> None:
     current = now_local()
     messages: list[tuple[str, str, str, int, str]] = []
     with session_scope() as session:
         todos = session.scalars(select(Todo).where(Todo.done.is_(False))).all()
         for todo in todos:
+            in_pre_due_window = False
             if todo.due_at:
                 pre_due_start = todo.due_at - timedelta(days=1)
                 if pre_due_start <= current < todo.due_at:
+                    in_pre_due_window = True
                     last_pre_due = todo.last_pre_due_reminded_at
                     if last_pre_due is None or current >= last_pre_due + timedelta(hours=2):
                         due_text = todo.due_at.strftime("%Y-%m-%d %H:%M")
@@ -59,14 +82,15 @@ async def remind_todos() -> None:
 
             should_remind = False
             if todo.due_at and current >= todo.due_at:
-                if todo.last_reminded_at is None:
+                if todo.last_reminded_at is None or todo.last_reminded_at < todo.due_at:
                     should_remind = True
                 elif todo.remind_every_minutes:
                     next_remind = todo.last_reminded_at + timedelta(minutes=todo.remind_every_minutes)
                     should_remind = current >= next_remind
+            elif todo.due_at and current < todo.due_at and todo.remind_every_minutes:
+                should_remind = not in_pre_due_window and _should_send_interval_reminder(todo, current)
             elif todo.remind_every_minutes:
-                base = todo.last_reminded_at or todo.due_at or todo.created_at
-                should_remind = current >= base + timedelta(minutes=todo.remind_every_minutes)
+                should_remind = _should_send_interval_reminder(todo, current)
 
             if not should_remind:
                 continue
@@ -155,7 +179,8 @@ async def remind_courses() -> None:
         for key_prefix, course_id, group_id, user_id, name, start_time, end_time, extra, label in reminder_items:
             start_at = combine_today(start_time, current)
             remind_at = start_at - timedelta(minutes=settings.course_remind_minutes)
-            if current < remind_at or current >= start_at:
+            late_until = start_at + timedelta(minutes=COURSE_REMINDER_LATE_GRACE_MINUTES)
+            if current < remind_at or current >= late_until:
                 continue
 
             reminder_key = f"{key_prefix}:{reminder_date}"
@@ -169,11 +194,16 @@ async def remind_courses() -> None:
 
             suffix = f"（{extra}）" if extra else ""
             prefix = f"{label}上课提醒" if label else "上课提醒"
+            if current >= start_at:
+                prefix = f"补发{prefix}"
+                lead_text = "已开始"
+            else:
+                lead_text = f"{settings.course_remind_minutes} 分钟后"
             messages.append(
                 (
                     group_id,
                     user_id,
-                    f"{prefix}：{settings.course_remind_minutes} 分钟后 {name} 开始，时间 {start_time}-{end_time}{suffix}",
+                    f"{prefix}：{lead_text} {name}，时间 {start_time}-{end_time}{suffix}",
                     course_id,
                     reminder_key,
                 )
@@ -194,6 +224,8 @@ async def remind_courses() -> None:
 
 async def remind_important_schedules() -> None:
     current = now_local()
+    if current.hour < IMPORTANT_SCHEDULE_REMIND_HOUR:
+        return
     today_text = current.strftime("%Y-%m-%d")
     messages: list[tuple[str, str, str, int]] = []
     with session_scope() as session:
@@ -251,6 +283,13 @@ async def start_scheduler() -> None:
         hour=8,
         minute=0,
         id="remind_important_schedules",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        remind_important_schedules,
+        "interval",
+        minutes=10,
+        id="catch_up_important_schedules",
         replace_existing=True,
     )
     scheduler.start()

@@ -68,6 +68,16 @@ INTRO_TEXT = "\n".join(
 )
 
 
+def _format_interval(minutes: int | None) -> str:
+    if not minutes:
+        return ""
+    if minutes % 1440 == 0:
+        return f"，每 {minutes // 1440} 天提醒"
+    if minutes % 60 == 0:
+        return f"，每 {minutes // 60} 小时提醒"
+    return f"，每 {minutes} 分钟提醒"
+
+
 def _looks_like_command(text: str) -> bool:
     text = text.strip()
     if not text:
@@ -104,7 +114,7 @@ async def handle_ai_mention(event: GroupMessageEvent):
         remind_every = parse_repeat_interval(prompt)
         todo_id = add_todo(str(event.group_id), str(event.user_id), content, due_at, remind_every)
         due_text = due_at.strftime("%Y-%m-%d %H:%M") if due_at else "无截止时间"
-        await ai_mention.finish(f"已帮你添加 todo #{todo_id}：{content}（{due_text}）喵")
+        await ai_mention.finish(f"已帮你添加 todo #{todo_id}：{content}（{due_text}{_format_interval(remind_every)}）喵")
     intent = await parse_todo_intent(prompt)
     if intent:
         due_at, _rest = parse_natural_datetime_prefix(f"{intent['time_text']} {intent['content']}")
@@ -114,7 +124,9 @@ async def handle_ai_mention(event: GroupMessageEvent):
                 remind_every = None
             todo_id = add_todo(str(event.group_id), str(event.user_id), intent["content"], due_at, remind_every)
             due_text = due_at.strftime("%Y-%m-%d %H:%M")
-            await ai_mention.finish(f"已帮你添加 todo #{todo_id}：{intent['content']}（{due_text}）喵")
+            await ai_mention.finish(
+                f"已帮你添加 todo #{todo_id}：{intent['content']}（{due_text}{_format_interval(remind_every)}）喵"
+            )
     try:
         reply = await chat(prompt, str(event.user_id))
     except Exception as exc:

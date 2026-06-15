@@ -31,6 +31,33 @@ def _expand_week_numbers(value: str) -> set[int]:
     return result
 
 
+def is_valid_week_rule(weeks: str) -> bool:
+    rule = (weeks or "").strip()
+    if not rule or rule in {"全部", "每周", "all", "ALL"}:
+        return True
+
+    odd_only = "单" in rule or "odd" in rule.lower()
+    even_only = "双" in rule or "even" in rule.lower()
+    number_rule = re.sub(r"(单周|双周|单|双|odd|even|周|第)", "", rule, flags=re.IGNORECASE).strip()
+    if not number_rule:
+        return odd_only or even_only
+
+    for part in re.split(r"[，,、\s]+", number_rule):
+        part = part.strip()
+        if not part:
+            continue
+        range_match = re.fullmatch(r"(\d+)\s*-\s*(\d+)", part)
+        if range_match:
+            start = int(range_match.group(1))
+            end = int(range_match.group(2))
+            if start < 1 or end < start:
+                return False
+            continue
+        if not part.isdigit() or int(part) < 1:
+            return False
+    return True
+
+
 def is_week_enabled(weeks: str, week_number: int | None) -> bool:
     rule = (weeks or "").strip()
     if not rule or rule in {"全部", "每周", "all", "ALL"}:

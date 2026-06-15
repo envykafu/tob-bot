@@ -106,8 +106,10 @@ async def parse_todo_intent(message: str) -> dict | None:
                     "只输出JSON，不要输出解释。"
                     "如果不是提醒/todo/截止/待办意图，输出 {\"intent\":\"chat\"}。"
                     "如果是，输出 {\"intent\":\"todo_add\",\"content\":\"任务内容\",\"time_text\":\"时间文本\",\"remind_every_minutes\":null}。"
-                    "time_text 保留用户原话里的时间，例如：三天后、明天20:00、2026/6/15。"
-                    "如果用户说每n天提醒一次，把 remind_every_minutes 设为 n*1440。"
+                    "content 只保留真正事项，去掉“我有一个/我要/记得/提醒我/每天提醒我”等口语。"
+                    "time_text 保留用户原话里的截止或发生时间，例如：三天后、明天20:00、明天晚上八点、2026/6/15。"
+                    "如果用户说每天/每日提醒，把 remind_every_minutes 设为 1440；每小时设为60；每两天设为2880；每n天提醒一次设为 n*1440。"
+                    "例：三天后我有一个考试，记得每天提醒我 => {\"intent\":\"todo_add\",\"content\":\"考试\",\"time_text\":\"三天后\",\"remind_every_minutes\":1440}。"
                 ),
             },
             {"role": "user", "content": message},
