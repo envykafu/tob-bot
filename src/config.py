@@ -80,6 +80,9 @@ class Settings:
     ai_api_key: str = os.getenv("AI_API_KEY", "")
     ai_model: str = os.getenv("AI_MODEL", "gpt-4o")
     ai_timeout_seconds: int = _int("AI_TIMEOUT_SECONDS", 30, min_value=1)
+    ai_max_tokens: int = _int("AI_MAX_TOKENS", 1600, min_value=128)
+    ai_reply_chunk_size: int = _int("AI_REPLY_CHUNK_SIZE", 1200, min_value=200)
+    ai_context_messages: int = _int("AI_CONTEXT_MESSAGES", 12, min_value=2)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "superusers", _json_list("SUPERUSERS", []))

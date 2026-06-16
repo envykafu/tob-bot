@@ -1,15 +1,21 @@
+import nonebot
+
 from nonebot import on_command, on_message
-from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message
+from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message
 from nonebot.params import CommandArg
 from nonebot.rule import to_me
 
 from src.ai_client import chat, config_summary, parse_todo_intent
+from src.ai_memory import load_context, save_context
+from src.config import settings
+from src.db import init_db
 from src.time_utils import parse_natural_datetime_prefix
 from src.todo_service import add_todo, parse_repeat_interval, parse_todo_from_text
 
 
 ai_cmd = on_command("ai", priority=30, block=True)
 ai_mention = on_message(rule=to_me(), priority=50, block=False)
+driver = nonebot.get_driver()
 
 COMMAND_PREFIXES = (
     "/",
@@ -71,6 +77,11 @@ INTRO_TEXT = "\n".join(
 )
 
 
+@driver.on_startup
+async def init_ai_storage() -> None:
+    init_db()
+
+
 def _format_interval(minutes: int | None) -> str:
     if not minutes:
         return ""
@@ -90,22 +101,76 @@ def _looks_like_command(text: str) -> bool:
     return any(text == command or text.startswith(f"{command} ") or text.startswith(f"{command}\n") for command in COMMAND_PREFIXES)
 
 
+def _reply_bot_message_id(event: GroupMessageEvent, bot: Bot) -> int | None:
+    reply = getattr(event, "reply", None)
+    if reply is None or reply.sender.user_id is None:
+        return None
+    if str(reply.sender.user_id) != str(bot.self_id):
+        return None
+    return int(reply.message_id)
+
+
+def _split_reply(text: str) -> list[str]:
+    size = settings.ai_reply_chunk_size
+    if len(text) <= size:
+        return [text]
+    chunks: list[str] = []
+    current = ""
+    for paragraph in text.splitlines(keepends=True):
+        if len(paragraph) > size:
+            if current:
+                chunks.append(current.rstrip())
+                current = ""
+            for index in range(0, len(paragraph), size):
+                chunks.append(paragraph[index : index + size].rstrip())
+            continue
+        if len(current) + len(paragraph) > size:
+            chunks.append(current.rstrip())
+            current = paragraph
+        else:
+            current += paragraph
+    if current.strip():
+        chunks.append(current.rstrip())
+    return [chunk for chunk in chunks if chunk]
+
+
+async def _send_ai_reply(matcher, event: GroupMessageEvent, bot: Bot, reply: str, messages: list[dict[str, str]]) -> None:
+    parent_message_id = _reply_bot_message_id(event, bot)
+    sent_message_ids: list[int] = []
+    chunks = _split_reply(reply)
+    for index, chunk in enumerate(chunks, start=1):
+        message = chunk if len(chunks) == 1 else f"({index}/{len(chunks)})\n{chunk}"
+        result = await matcher.send(message)
+        if isinstance(result, dict) and result.get("message_id") is not None:
+            sent_message_ids.append(int(result["message_id"]))
+    for message_id in sent_message_ids:
+        save_context(
+            group_id=str(event.group_id),
+            user_id=str(event.user_id),
+            bot_message_id=message_id,
+            parent_bot_message_id=parent_message_id,
+            messages=messages,
+        )
+    await matcher.finish()
+
+
 @ai_cmd.handle()
-async def handle_ai(event: GroupMessageEvent, args: Message = CommandArg()):
+async def handle_ai(bot: Bot, event: GroupMessageEvent, args: Message = CommandArg()):
     prompt = args.extract_plain_text().strip()
     if not prompt:
         await ai_cmd.finish("用法：/ai 你好")
     if prompt.lower() in {"debug", "配置", "config"}:
         await ai_cmd.finish(config_summary())
     try:
-        reply = await chat(prompt, str(event.user_id))
+        parent_message_id = _reply_bot_message_id(event, bot)
+        reply, messages = await chat(prompt, str(event.user_id), load_context(parent_message_id))
     except Exception as exc:
         await ai_cmd.finish(f"AI 调用失败：{str(exc)[:120]}")
-    await ai_cmd.finish(reply)
+    await _send_ai_reply(ai_cmd, event, bot, reply, messages)
 
 
 @ai_mention.handle()
-async def handle_ai_mention(event: GroupMessageEvent):
+async def handle_ai_mention(bot: Bot, event: GroupMessageEvent):
     prompt = event.get_plaintext().strip()
     if not prompt:
         await ai_mention.finish(INTRO_TEXT)
@@ -131,7 +196,8 @@ async def handle_ai_mention(event: GroupMessageEvent):
                 f"已帮你添加 todo #{todo_id}：{intent['content']}（{due_text}{_format_interval(remind_every)}）喵"
             )
     try:
-        reply = await chat(prompt, str(event.user_id))
+        parent_message_id = _reply_bot_message_id(event, bot)
+        reply, messages = await chat(prompt, str(event.user_id), load_context(parent_message_id))
     except Exception as exc:
         await ai_mention.finish(f"AI 调用失败：{str(exc)[:120]}")
-    await ai_mention.finish(reply)
+    await _send_ai_reply(ai_mention, event, bot, reply, messages)

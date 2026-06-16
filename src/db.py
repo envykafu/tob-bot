@@ -116,6 +116,18 @@ class DriftBottle(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now_local)
 
 
+class AIConversation(Base):
+    __tablename__ = "ai_conversations"
+
+    bot_message_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    parent_bot_message_id: Mapped[str] = mapped_column(String(64), default="", index=True)
+    group_id: Mapped[str] = mapped_column(String(32), index=True)
+    user_id: Mapped[str] = mapped_column(String(32), index=True)
+    messages_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_local)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now_local)
+
+
 def make_engine():
     db_path = Path(settings.db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
