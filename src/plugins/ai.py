@@ -9,8 +9,8 @@ from src.ai_client import chat, config_summary, parse_todo_intent
 from src.ai_memory import load_context, save_context
 from src.config import settings
 from src.db import init_db
-from src.time_utils import parse_natural_datetime_prefix, parse_next_time_prefix
-from src.todo_service import add_todo, parse_todo_request
+from src.time_utils import DateTimeParseError, parse_natural_datetime_prefix, parse_next_time_prefix
+from src.todo_service import TodoParseError, add_todo, parse_todo_request
 
 
 ai_cmd = on_command("ai", priority=30, block=True)
@@ -186,7 +186,10 @@ async def handle_ai_mention(bot: Bot, event: GroupMessageEvent):
         await ai_mention.finish(INTRO_TEXT)
     if _looks_like_command(prompt):
         return
-    local_todo = parse_todo_request(prompt)
+    try:
+        local_todo = parse_todo_request(prompt)
+    except (DateTimeParseError, TodoParseError) as exc:
+        await ai_mention.finish(str(exc))
     if local_todo:
         todo_id = add_todo(
             str(event.group_id),
@@ -205,9 +208,12 @@ async def handle_ai_mention(bot: Bot, event: GroupMessageEvent):
         )
     intent = await parse_todo_intent(prompt)
     if intent:
-        due_at, _rest = parse_natural_datetime_prefix(f"{intent['time_text']} {intent['content']}")
-        if not due_at:
-            due_at, _rest = parse_next_time_prefix(f"{intent['time_text']} {intent['content']}")
+        try:
+            due_at, _rest = parse_natural_datetime_prefix(f"{intent['time_text']} {intent['content']}")
+            if not due_at:
+                due_at, _rest = parse_next_time_prefix(f"{intent['time_text']} {intent['content']}")
+        except DateTimeParseError as exc:
+            await ai_mention.finish(str(exc))
         if due_at:
             remind_every = intent.get("remind_every_minutes")
             if not isinstance(remind_every, int):
