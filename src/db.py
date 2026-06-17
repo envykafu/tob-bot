@@ -25,7 +25,9 @@ class Todo(Base):
     end_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     due_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     remind_every_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    lead_remind_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_reminded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_lead_reminded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_pre_due_reminded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     done: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now_local)
@@ -161,6 +163,10 @@ def migrate_db() -> None:
             statements.append("ALTER TABLE todos ADD COLUMN end_at DATETIME")
         if "last_pre_due_reminded_at" not in existing:
             statements.append("ALTER TABLE todos ADD COLUMN last_pre_due_reminded_at DATETIME")
+        if "lead_remind_minutes" not in existing:
+            statements.append("ALTER TABLE todos ADD COLUMN lead_remind_minutes INTEGER")
+        if "last_lead_reminded_at" not in existing:
+            statements.append("ALTER TABLE todos ADD COLUMN last_lead_reminded_at DATETIME")
     if "black_history" in table_names:
         existing = {column["name"] for column in inspector.get_columns("black_history")}
         if "content_type" not in existing:

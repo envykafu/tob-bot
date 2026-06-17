@@ -64,8 +64,28 @@ async def remind_todos() -> None:
         for todo in todos:
             in_pre_due_window = False
             if todo.due_at:
+                if todo.lead_remind_minutes:
+                    lead_time = todo.due_at - timedelta(minutes=todo.lead_remind_minutes)
+                    if lead_time <= current < todo.due_at:
+                        last_lead = todo.last_lead_reminded_at
+                        if last_lead is None or last_lead < lead_time:
+                            due_text = todo.due_at.strftime("%Y-%m-%d %H:%M")
+                            messages.append(
+                                (
+                                    todo.group_id,
+                                    todo.user_id,
+                                    f"todo 提前提醒：#{todo.id} {todo.content}（截止 {due_text}）",
+                                    todo.id,
+                                    "lead",
+                                )
+                            )
+
                 pre_due_start = todo.due_at - timedelta(days=1)
-                if pre_due_start <= current < todo.due_at:
+                in_lead_window = bool(
+                    todo.lead_remind_minutes
+                    and current >= todo.due_at - timedelta(minutes=todo.lead_remind_minutes)
+                )
+                if todo.created_at <= pre_due_start <= current < todo.due_at and not in_lead_window:
                     in_pre_due_window = True
                     last_pre_due = todo.last_pre_due_reminded_at
                     if last_pre_due is None or current >= last_pre_due + timedelta(hours=2):
@@ -111,6 +131,8 @@ async def remind_todos() -> None:
                 continue
             if reminder_type == "pre_due":
                 todo.last_pre_due_reminded_at = current
+            elif reminder_type == "lead":
+                todo.last_lead_reminded_at = current
             else:
                 todo.last_reminded_at = current
             todo.updated_at = current

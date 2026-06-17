@@ -8,7 +8,13 @@ from sqlalchemy import select
 
 from src.db import Todo, init_db, session_scope
 from src.time_utils import now_local, parse_datetime, parse_natural_datetime_prefix
-from src.todo_service import add_todo, normalize_todo_text, parse_repeat_interval
+from src.todo_service import (
+    DEFAULT_LEAD_REMIND_MINUTES,
+    add_todo,
+    normalize_todo_text,
+    parse_repeat_interval,
+    parse_todo_request,
+)
 
 
 todo_cmd = on_command("todo", priority=20, block=True)
@@ -21,6 +27,14 @@ def _format_interval(minutes: int | None) -> str:
         days = minutes // 1440
         return f"，每 {days} 天提醒"
     return f"，每 {minutes} 分钟提醒"
+
+
+def _format_lead_reminder(minutes: int | None) -> str:
+    if not minutes:
+        return ""
+    if minutes % 60 == 0:
+        return f"，提前 {minutes // 60} 小时提醒"
+    return f"，提前 {minutes} 分钟提醒"
 
 
 def _parse_todo_datetime(text: str) -> tuple[datetime | None, str]:
@@ -75,7 +89,11 @@ def _parse_due_payload(payload: str) -> tuple[datetime | None, str]:
     return parse_natural_datetime_prefix(content)
 
 
-def _parse_add_payload(payload: str) -> tuple[str, datetime | None, datetime | None, datetime | None, int | None, str | None]:
+def _parse_add_payload(
+    payload: str,
+) -> tuple[str, datetime | None, datetime | None, datetime | None, int | None, int | None, str | None]:
+    natural = parse_todo_request(payload, allow_plain_time=True)
+    natural_lead = natural.lead_remind_minutes if natural else None
     due_at, rest = parse_natural_datetime_prefix(payload)
     start_at, end_at, range_rest = _parse_time_range_payload(payload)
     if start_at or end_at:
@@ -85,6 +103,8 @@ def _parse_add_payload(payload: str) -> tuple[str, datetime | None, datetime | N
         due_at, rest = _parse_due_payload(payload)
         content = rest.strip() if due_at else payload.strip()
     remind_every = parse_repeat_interval(content)
+    if remind_every is None and natural:
+        remind_every = natural.remind_every_minutes
 
     remind_match = None
     for marker in [" remind "]:
@@ -101,16 +121,38 @@ def _parse_add_payload(payload: str) -> tuple[str, datetime | None, datetime | N
             else:
                 remind_every = int(normalized.replace("分钟", "").replace("分", "").strip())
         except ValueError:
-            return "", None, None, None, None, "提醒间隔格式不正确，例如：/todo add 三天 大作业 每 1 天"
+            return "", None, None, None, None, None, "提醒间隔格式不正确，例如：/todo add 三天 大作业 每 1 天"
         if remind_every < 1:
-            return "", None, None, None, None, "提醒间隔必须大于 0。"
+            return "", None, None, None, None, None, "提醒间隔必须大于 0。"
 
     content = normalize_todo_text(content)
     if not content:
-        return "", None, None, None, None, "todo 内容不能为空。"
+        if natural:
+            return (
+                natural.content,
+                natural.due_at,
+                natural.start_at,
+                natural.end_at,
+                natural.remind_every_minutes,
+                natural.lead_remind_minutes,
+                None,
+            )
+        return "", None, None, None, None, None, "todo 内容不能为空。"
     if start_at and end_at and end_at < start_at:
-        return "", None, None, None, None, "todo 结束时间不能早于开始时间。"
-    return content, due_at, start_at, end_at, remind_every, None
+        return "", None, None, None, None, None, "todo 结束时间不能早于开始时间。"
+    if natural and due_at is None and start_at is None and end_at is None:
+        return (
+            natural.content,
+            natural.due_at,
+            natural.start_at,
+            natural.end_at,
+            natural.remind_every_minutes,
+            natural.lead_remind_minutes,
+            None,
+        )
+    if due_at and natural_lead is None:
+        natural_lead = DEFAULT_LEAD_REMIND_MINUTES
+    return content, due_at, start_at, end_at, remind_every, natural_lead, None
 
 
 def _find_todo(session, group_id: str, user_id: str, target: str):
@@ -189,14 +231,15 @@ async def handle_todo(event: GroupMessageEvent, args: Message = CommandArg()):
     group_id = str(event.group_id)
     user_id = str(event.user_id)
 
-    if action == "add":
-        content, due_at, start_at, end_at, remind_every, error = _parse_add_payload(payload)
+    if action in {"add", "添加", "新增"}:
+        content, due_at, start_at, end_at, remind_every, lead_remind, error = _parse_add_payload(payload)
         if error:
             await todo_cmd.finish(error)
-        todo_id = add_todo(group_id, user_id, content, due_at, remind_every, start_at, end_at)
+        todo_id = add_todo(group_id, user_id, content, due_at, remind_every, start_at, end_at, lead_remind)
         time_text = _format_added_todo_time(due_at, start_at, end_at)
         interval = _format_interval(remind_every)
-        await todo_cmd.finish(f"已添加 todo #{todo_id}：{content}（{time_text}{interval}）。")
+        lead = _format_lead_reminder(lead_remind)
+        await todo_cmd.finish(f"已添加 todo #{todo_id}：{content}（{time_text}{interval}{lead}）。")
 
     if action == "list":
         with session_scope() as session:
@@ -211,7 +254,8 @@ async def handle_todo(event: GroupMessageEvent, args: Message = CommandArg()):
         for todo in todos:
             due = _format_todo_time(todo)
             interval = _format_interval(todo.remind_every_minutes)
-            lines.append(f"#{todo.id} {todo.content}（{due}{interval}）")
+            lead = _format_lead_reminder(todo.lead_remind_minutes)
+            lines.append(f"#{todo.id} {todo.content}（{due}{interval}{lead}）")
         await todo_cmd.finish("\n".join(lines))
 
     if action in {"done", "delete"}:
@@ -229,4 +273,21 @@ async def handle_todo(event: GroupMessageEvent, args: Message = CommandArg()):
                 result = f"已删除 todo #{todo_id}。"
         await todo_cmd.finish(result)
 
-    await todo_cmd.finish("未知 todo 命令。可用：add/list/done/delete")
+    natural = parse_todo_request(raw, allow_plain_time=True)
+    if natural:
+        todo_id = add_todo(
+            group_id,
+            user_id,
+            natural.content,
+            natural.due_at,
+            natural.remind_every_minutes,
+            natural.start_at,
+            natural.end_at,
+            natural.lead_remind_minutes,
+        )
+        time_text = _format_added_todo_time(natural.due_at, natural.start_at, natural.end_at)
+        interval = _format_interval(natural.remind_every_minutes)
+        lead = _format_lead_reminder(natural.lead_remind_minutes)
+        await todo_cmd.finish(f"已添加 todo #{todo_id}：{natural.content}（{time_text}{interval}{lead}）。")
+
+    await todo_cmd.finish("未知 todo 命令。可用：add/list/done/delete；也可以直接写 /todo 晚上六点检查卫生")

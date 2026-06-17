@@ -8,6 +8,8 @@ DIRECT_COMMANDS = {
     "readme",
     "说明",
     "命令说明",
+    "status",
+    "状态",
     "todo",
     "course",
     "课表",

@@ -59,11 +59,15 @@ def _parse_time_prefix(text: str) -> tuple[str | None, str]:
     if not raw:
         return None, raw
 
-    hhmm_match = re.match(r"^(?P<time>\d{1,2}[:：]\d{2})\s*(?P<rest>.*)$", raw)
+    hhmm_match = re.match(
+        r"^(?P<period>凌晨|早上|早晨|上午|中午|下午|晚上|今晚|傍晚|明早)?\s*"
+        r"(?P<time>\d{1,2}[:：]\d{2})\s*(?P<rest>.*)$",
+        raw,
+    )
     if hhmm_match:
         time_text = hhmm_match.group("time").replace("：", ":")
         hour_text, minute_text = time_text.split(":", 1)
-        hour = int(hour_text)
+        hour = _normalize_hour(hhmm_match.group("period") or None, int(hour_text))
         minute = int(minute_text)
         if 0 <= hour <= 23 and 0 <= minute <= 59:
             return f"{hour:02d}:{minute:02d}", hhmm_match.group("rest").strip()
@@ -219,6 +223,20 @@ def parse_natural_datetime_prefix(text: str) -> tuple[datetime | None, str]:
         return parsed, final_rest
 
     return None, raw
+
+
+def parse_next_time_prefix(text: str) -> tuple[datetime | None, str]:
+    raw = text.strip()
+    time_text, rest = _parse_time_prefix(raw)
+    if not time_text:
+        return None, raw
+    current = now_local()
+    parsed = parse_datetime(f"{current.strftime('%Y-%m-%d')} {time_text}")
+    if parsed is None:
+        return None, raw
+    if parsed <= current:
+        parsed = parsed + timedelta(days=1)
+    return parsed, rest
 
 
 def parse_hhmm(value: str) -> time:

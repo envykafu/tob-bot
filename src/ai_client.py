@@ -138,6 +138,7 @@ async def parse_todo_intent(message: str) -> dict | None:
                     "你只负责把用户中文自然语言解析为todo添加意图。"
                     "只输出JSON，不要输出解释。"
                     "如果不是提醒/todo/截止/待办意图，输出 {\"intent\":\"chat\"}。"
+                    "如果用户给出明确未来时间和需要执行的事项，也视为 todo_add，例如“晚上六点检查卫生”。"
                     "如果是，输出 {\"intent\":\"todo_add\",\"content\":\"任务内容\",\"time_text\":\"时间文本\",\"remind_every_minutes\":null}。"
                     "content 只保留真正事项，去掉“我有一个/我要/记得/提醒我/每天提醒我”等口语。"
                     "time_text 保留用户原话里的截止或发生时间，例如：三天后、明天20:00、明天晚上八点、2026/6/15。"

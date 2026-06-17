@@ -9,8 +9,8 @@ from src.ai_client import chat, config_summary, parse_todo_intent
 from src.ai_memory import load_context, save_context
 from src.config import settings
 from src.db import init_db
-from src.time_utils import parse_natural_datetime_prefix
-from src.todo_service import add_todo, parse_repeat_interval, parse_todo_from_text
+from src.time_utils import parse_natural_datetime_prefix, parse_next_time_prefix
+from src.todo_service import add_todo, parse_todo_request
 
 
 ai_cmd = on_command("ai", priority=30, block=True)
@@ -24,6 +24,8 @@ COMMAND_PREFIXES = (
     "readme",
     "说明",
     "命令说明",
+    "status",
+    "状态",
     "todo",
     "course",
     "课表",
@@ -90,6 +92,14 @@ def _format_interval(minutes: int | None) -> str:
     if minutes % 60 == 0:
         return f"，每 {minutes // 60} 小时提醒"
     return f"，每 {minutes} 分钟提醒"
+
+
+def _format_lead_reminder(minutes: int | None) -> str:
+    if not minutes:
+        return ""
+    if minutes % 60 == 0:
+        return f"，提前 {minutes // 60} 小时提醒"
+    return f"，提前 {minutes} 分钟提醒"
 
 
 def _looks_like_command(text: str) -> bool:
@@ -176,24 +186,43 @@ async def handle_ai_mention(bot: Bot, event: GroupMessageEvent):
         await ai_mention.finish(INTRO_TEXT)
     if _looks_like_command(prompt):
         return
-    local_todo = parse_todo_from_text(prompt)
+    local_todo = parse_todo_request(prompt)
     if local_todo:
-        content, due_at = local_todo
-        remind_every = parse_repeat_interval(prompt)
-        todo_id = add_todo(str(event.group_id), str(event.user_id), content, due_at, remind_every)
-        due_text = due_at.strftime("%Y-%m-%d %H:%M") if due_at else "无截止时间"
-        await ai_mention.finish(f"已帮你添加 todo #{todo_id}：{content}（{due_text}{_format_interval(remind_every)}）喵")
+        todo_id = add_todo(
+            str(event.group_id),
+            str(event.user_id),
+            local_todo.content,
+            local_todo.due_at,
+            local_todo.remind_every_minutes,
+            local_todo.start_at,
+            local_todo.end_at,
+            local_todo.lead_remind_minutes,
+        )
+        due_text = local_todo.due_at.strftime("%Y-%m-%d %H:%M") if local_todo.due_at else "无截止时间"
+        await ai_mention.finish(
+            f"已帮你添加 todo #{todo_id}：{local_todo.content}（{due_text}"
+            f"{_format_interval(local_todo.remind_every_minutes)}{_format_lead_reminder(local_todo.lead_remind_minutes)}）喵"
+        )
     intent = await parse_todo_intent(prompt)
     if intent:
         due_at, _rest = parse_natural_datetime_prefix(f"{intent['time_text']} {intent['content']}")
+        if not due_at:
+            due_at, _rest = parse_next_time_prefix(f"{intent['time_text']} {intent['content']}")
         if due_at:
             remind_every = intent.get("remind_every_minutes")
             if not isinstance(remind_every, int):
                 remind_every = None
-            todo_id = add_todo(str(event.group_id), str(event.user_id), intent["content"], due_at, remind_every)
+            todo_id = add_todo(
+                str(event.group_id),
+                str(event.user_id),
+                intent["content"],
+                due_at,
+                remind_every,
+                lead_remind_minutes=15,
+            )
             due_text = due_at.strftime("%Y-%m-%d %H:%M")
             await ai_mention.finish(
-                f"已帮你添加 todo #{todo_id}：{intent['content']}（{due_text}{_format_interval(remind_every)}）喵"
+                f"已帮你添加 todo #{todo_id}：{intent['content']}（{due_text}{_format_interval(remind_every)}，提前 15 分钟提醒）喵"
             )
     try:
         parent_message_id = _reply_bot_message_id(event, bot)
