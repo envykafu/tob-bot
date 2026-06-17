@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from src.db import Todo, session_scope
-from src.time_utils import now_local, parse_natural_datetime_prefix, parse_next_time_prefix
+from src.time_utils import DateTimeParseError, now_local, parse_natural_datetime_prefix, parse_next_time_prefix
 
 
 REMINDER_HINTS = ("提醒", "截止", "ddl", "DDL", "待办", "todo", "Todo", "作业", "任务", "记得", "备忘")
@@ -53,6 +53,10 @@ class ParsedTodoRequest:
     end_at: datetime | None = None
 
 
+class TodoParseError(ValueError):
+    pass
+
+
 def looks_like_todo_request(text: str) -> bool:
     return any(hint in text for hint in REMINDER_HINTS)
 
@@ -89,6 +93,7 @@ def normalize_todo_text(text: str) -> str:
     cleaned = re.sub(r"(记得)?\s*提醒我[一下]?", "", cleaned).strip()
     cleaned = re.sub(r"^(提醒我|提醒一下我|提醒)\s*", "", cleaned).strip()
     cleaned = re.sub(r"(要)?截止了?$", "", cleaned).strip()
+    cleaned = re.sub(r"\b(?:due|ddl|DDL)\b", "", cleaned).strip()
     cleaned = re.sub(r"我有一个|我有个|我有|我要", "", cleaned).strip()
     cleaned = re.sub(r"有一个", "", cleaned).strip()
     cleaned = re.sub(r"有个", "", cleaned).strip()
@@ -153,6 +158,54 @@ def _parse_due_and_content(text: str) -> tuple[datetime | None, str]:
     return None, text
 
 
+def _parse_datetime_fragment(fragment: str) -> tuple[datetime | None, str]:
+    parsed, rest = parse_natural_datetime_prefix(fragment)
+    if parsed:
+        return parsed, rest
+    return parse_next_time_prefix(fragment)
+
+
+def _parse_time_range(text: str) -> tuple[datetime | None, datetime | None, str]:
+    raw = text.strip()
+    explicit = re.match(
+        r"^(?:start|开始|起始)\s+(?P<start>.+?)\s+(?:end|结束|截止)\s+(?P<end>.+?)\s+(?P<content>.+)$",
+        raw,
+        re.IGNORECASE,
+    )
+    if explicit:
+        start_at, start_rest = _parse_datetime_fragment(explicit.group("start"))
+        end_at, end_rest = _parse_datetime_fragment(explicit.group("end"))
+        if start_at and end_at and not start_rest and not end_rest:
+            return start_at, end_at, explicit.group("content").strip()
+
+    range_match = re.match(
+        r"^(?P<prefix>.+?\s+)?(?P<start>\d{1,2}[:：]\d{2})\s*[-~至到]\s*(?P<end>\d{1,2}[:：]\d{2})\s+(?P<content>.+)$",
+        raw,
+    )
+    if not range_match:
+        return None, None, raw
+    prefix = (range_match.group("prefix") or "").strip()
+    start_text = f"{prefix} {range_match.group('start')}".strip()
+    end_text = f"{prefix} {range_match.group('end')}".strip()
+    start_at, start_rest = _parse_datetime_fragment(start_text)
+    end_at, end_rest = _parse_datetime_fragment(end_text)
+    if start_at and end_at and not start_rest and not end_rest:
+        if end_at < start_at:
+            raise TodoParseError("todo 结束时间不能早于开始时间。")
+        return start_at, end_at, range_match.group("content").strip()
+    return None, None, raw
+
+
+REPEAT_HINT_RE = re.compile(r"每\s*(?:\d+|[一二两三四五六七八九十]+)?\s*(?:天|日|分钟|分|小时|钟头|周|星期|礼拜)")
+
+
+def _validate_repeat_interval(text: str, interval: int | None) -> None:
+    if interval is not None:
+        return
+    if REPEAT_HINT_RE.search(text):
+        raise TodoParseError("重复提醒间隔不正确，必须大于 0，例如：每 1 天、每 30 分钟。")
+
+
 def parse_todo_request(text: str, allow_plain_time: bool = False) -> ParsedTodoRequest | None:
     raw = text.strip()
     if not raw:
@@ -160,8 +213,14 @@ def parse_todo_request(text: str, allow_plain_time: bool = False) -> ParsedTodoR
     has_hint = looks_like_todo_request(raw)
     lead_remind, without_lead = _parse_lead_remind_minutes(raw)
     remind_every = parse_repeat_interval(without_lead)
+    _validate_repeat_interval(without_lead, remind_every)
     normalized = normalize_todo_text(without_lead)
-    due_at, rest = _parse_due_and_content(normalized)
+    start_at, end_at, range_rest = _parse_time_range(normalized)
+    if start_at or end_at:
+        due_at = end_at
+        rest = range_rest
+    else:
+        due_at, rest = _parse_due_and_content(normalized)
     if not due_at:
         return None
     content = normalize_todo_text(rest)
@@ -178,6 +237,8 @@ def parse_todo_request(text: str, allow_plain_time: bool = False) -> ParsedTodoR
         due_at=due_at,
         remind_every_minutes=remind_every,
         lead_remind_minutes=lead_remind,
+        start_at=start_at,
+        end_at=end_at,
     )
 
 
@@ -204,19 +265,19 @@ def parse_repeat_interval(text: str) -> int | None:
     match = re.search(r"每\s*(\d+|[一二两三四五六七八九十]+)\s*(天|日)\s*(提醒)?(我)?(一下|一次)?", text)
     if match:
         number = _cn_number_to_int(match.group(1))
-        return number * 1440 if number else None
+        return number * 1440 if number and number > 0 else None
     match = re.search(r"每\s*(\d+|[一二两三四五六七八九十]+)\s*(小时|钟头)\s*(提醒)?(我)?(一下|一次)?", text)
     if match:
         number = _cn_number_to_int(match.group(1))
-        return number * 60 if number else None
+        return number * 60 if number and number > 0 else None
     match = re.search(r"每\s*(\d+|[一二两三四五六七八九十]+)\s*(分钟|分)\s*(提醒)?(我)?(一下|一次)?", text)
     if match:
         number = _cn_number_to_int(match.group(1))
-        return number if number else None
+        return number if number and number > 0 else None
     match = re.search(r"每\s*(\d+|[一二两三四五六七八九十]+)\s*(周|星期|礼拜)\s*(提醒)?(我)?(一下|一次)?", text)
     if match:
         number = _cn_number_to_int(match.group(1))
-        return number * 10080 if number else None
+        return number * 10080 if number and number > 0 else None
     return None
 
 

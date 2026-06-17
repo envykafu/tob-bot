@@ -7,9 +7,9 @@ from nonebot.params import CommandArg
 from sqlalchemy import select
 
 from src.db import Todo, init_db, session_scope
-from src.time_utils import now_local, parse_datetime, parse_natural_datetime_prefix
+from src.time_utils import DateTimeParseError, now_local, parse_datetime, parse_natural_datetime_prefix
 from src.todo_service import (
-    DEFAULT_LEAD_REMIND_MINUTES,
+    TodoParseError,
     add_todo,
     normalize_todo_text,
     parse_repeat_interval,
@@ -92,55 +92,11 @@ def _parse_due_payload(payload: str) -> tuple[datetime | None, str]:
 def _parse_add_payload(
     payload: str,
 ) -> tuple[str, datetime | None, datetime | None, datetime | None, int | None, int | None, str | None]:
-    natural = parse_todo_request(payload, allow_plain_time=True)
-    natural_lead = natural.lead_remind_minutes if natural else None
-    due_at, rest = parse_natural_datetime_prefix(payload)
-    start_at, end_at, range_rest = _parse_time_range_payload(payload)
-    if start_at or end_at:
-        due_at = end_at
-        content = range_rest.strip()
-    else:
-        due_at, rest = _parse_due_payload(payload)
-        content = rest.strip() if due_at else payload.strip()
-    remind_every = parse_repeat_interval(content)
-    if remind_every is None and natural:
-        remind_every = natural.remind_every_minutes
-
-    remind_match = None
-    for marker in [" remind "]:
-        if remind_every is None and marker in content:
-            before, _, after = content.partition(marker)
-            remind_match = after.strip()
-            content = before.strip()
-            break
-    if remind_match:
-        normalized = remind_match.replace("一次", "").strip()
-        try:
-            if "天" in normalized or "日" in normalized:
-                remind_every = int(normalized.replace("天", "").replace("日", "").strip()) * 1440
-            else:
-                remind_every = int(normalized.replace("分钟", "").replace("分", "").strip())
-        except ValueError:
-            return "", None, None, None, None, None, "提醒间隔格式不正确，例如：/todo add 三天 大作业 每 1 天"
-        if remind_every < 1:
-            return "", None, None, None, None, None, "提醒间隔必须大于 0。"
-
-    content = normalize_todo_text(content)
-    if not content:
-        if natural:
-            return (
-                natural.content,
-                natural.due_at,
-                natural.start_at,
-                natural.end_at,
-                natural.remind_every_minutes,
-                natural.lead_remind_minutes,
-                None,
-            )
-        return "", None, None, None, None, None, "todo 内容不能为空。"
-    if start_at and end_at and end_at < start_at:
-        return "", None, None, None, None, None, "todo 结束时间不能早于开始时间。"
-    if natural and due_at is None and start_at is None and end_at is None:
+    try:
+        natural = parse_todo_request(payload, allow_plain_time=True)
+    except (DateTimeParseError, TodoParseError) as exc:
+        return "", None, None, None, None, None, str(exc)
+    if natural:
         return (
             natural.content,
             natural.due_at,
@@ -150,9 +106,13 @@ def _parse_add_payload(
             natural.lead_remind_minutes,
             None,
         )
-    if due_at and natural_lead is None:
-        natural_lead = DEFAULT_LEAD_REMIND_MINUTES
-    return content, due_at, start_at, end_at, remind_every, natural_lead, None
+    remind_every = parse_repeat_interval(payload)
+    if remind_every is None and re.search(r"每\s*(?:\d+|[一二两三四五六七八九十]+)?\s*(?:天|日|分钟|分|小时|钟头|周|星期|礼拜)", payload):
+        return "", None, None, None, None, None, "重复提醒间隔不正确，必须大于 0，例如：每 1 天、每 30 分钟。"
+    content = normalize_todo_text(payload)
+    if not content:
+        return "", None, None, None, None, None, "todo 内容不能为空。"
+    return content, None, None, None, remind_every, None, None
 
 
 def _find_todo(session, group_id: str, user_id: str, target: str):
@@ -165,6 +125,8 @@ def _find_todo(session, group_id: str, user_id: str, target: str):
         )
         if todo is None:
             return None, f"没有找到 todo #{target}，或它不属于你。"
+        if todo.done:
+            return None, f"todo #{target} 已完成，不能重复完成或删除。"
         return todo, None
     todos = session.scalars(
         select(Todo).where(
@@ -273,7 +235,10 @@ async def handle_todo(event: GroupMessageEvent, args: Message = CommandArg()):
                 result = f"已删除 todo #{todo_id}。"
         await todo_cmd.finish(result)
 
-    natural = parse_todo_request(raw, allow_plain_time=True)
+    try:
+        natural = parse_todo_request(raw, allow_plain_time=True)
+    except (DateTimeParseError, TodoParseError) as exc:
+        await todo_cmd.finish(str(exc))
     if natural:
         todo_id = add_todo(
             group_id,

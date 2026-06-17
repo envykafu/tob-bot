@@ -63,10 +63,12 @@ async def remind_todos() -> None:
         todos = session.scalars(select(Todo).where(Todo.done.is_(False))).all()
         for todo in todos:
             in_pre_due_window = False
+            in_lead_window = False
             if todo.due_at:
                 if todo.lead_remind_minutes:
                     lead_time = todo.due_at - timedelta(minutes=todo.lead_remind_minutes)
                     if lead_time <= current < todo.due_at:
+                        in_lead_window = True
                         last_lead = todo.last_lead_reminded_at
                         if last_lead is None or last_lead < lead_time:
                             due_text = todo.due_at.strftime("%Y-%m-%d %H:%M")
@@ -81,10 +83,6 @@ async def remind_todos() -> None:
                             )
 
                 pre_due_start = todo.due_at - timedelta(days=1)
-                in_lead_window = bool(
-                    todo.lead_remind_minutes
-                    and current >= todo.due_at - timedelta(minutes=todo.lead_remind_minutes)
-                )
                 if todo.created_at <= pre_due_start <= current < todo.due_at and not in_lead_window:
                     in_pre_due_window = True
                     last_pre_due = todo.last_pre_due_reminded_at
@@ -108,7 +106,7 @@ async def remind_todos() -> None:
                     next_remind = todo.last_reminded_at + timedelta(minutes=todo.remind_every_minutes)
                     should_remind = current >= next_remind
             elif todo.due_at and current < todo.due_at and todo.remind_every_minutes:
-                should_remind = not in_pre_due_window and _should_send_interval_reminder(todo, current)
+                should_remind = not in_pre_due_window and not in_lead_window and _should_send_interval_reminder(todo, current)
             elif todo.remind_every_minutes:
                 should_remind = _should_send_interval_reminder(todo, current)
 

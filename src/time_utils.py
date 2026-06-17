@@ -22,6 +22,14 @@ CN_NUMBERS = {
 TIME_PERIODS_PM = {"下午", "晚上", "今晚", "傍晚"}
 TIME_PERIODS_AM = {"凌晨", "早上", "早晨", "上午", "明早"}
 TIME_PERIODS_NOON = {"中午"}
+INVALID_TIME_PREFIX_RE = re.compile(
+    r"^(?:凌晨|早上|早晨|上午|中午|下午|晚上|今晚|傍晚|明早)?\s*"
+    r"(?:\d{1,2}[:：]\d{2}|\d{1,2}\s*点(?:\d{1,2}\s*分?)?)"
+)
+
+
+class DateTimeParseError(ValueError):
+    pass
 
 
 def now_local() -> datetime:
@@ -97,6 +105,16 @@ def _parse_time_prefix(text: str) -> tuple[str | None, str]:
     if not (0 <= hour <= 23 and 0 <= minute <= 59):
         return None, raw
     return f"{hour:02d}:{minute:02d}", point_match.group("rest").strip()
+
+
+def has_invalid_time_prefix(text: str) -> bool:
+    raw = text.strip()
+    if not raw:
+        return False
+    time_text, _rest = _parse_time_prefix(raw)
+    if time_text:
+        return False
+    return bool(INVALID_TIME_PREFIX_RE.match(raw))
 
 
 def parse_datetime(value: str) -> datetime | None:
@@ -187,6 +205,8 @@ def parse_natural_datetime_prefix(text: str) -> tuple[datetime | None, str]:
             continue
         date_text = match.group("date")
         time_text, final_rest = _parse_time_prefix(match.group("rest"))
+        if time_text is None and has_invalid_time_prefix(match.group("rest")):
+            raise DateTimeParseError("时间格式不正确，请使用 00:00-23:59，例如 18:00。")
         time_text = time_text or "12:00"
         parsed_date = parse_date(date_text)
         if not parsed_date:
@@ -205,6 +225,8 @@ def parse_natural_datetime_prefix(text: str) -> tuple[datetime | None, str]:
         if raw.startswith(word):
             rest = raw[len(word):].strip()
             time_text, final_rest = _parse_time_prefix(rest)
+            if time_text is None and has_invalid_time_prefix(rest):
+                raise DateTimeParseError("时间格式不正确，请使用 00:00-23:59，例如 18:00。")
             time_text = time_text or "12:00"
             due_date = current + timedelta(days=days)
             parsed = parse_datetime(f"{due_date.strftime('%Y-%m-%d')} {time_text}")
@@ -218,6 +240,8 @@ def parse_natural_datetime_prefix(text: str) -> tuple[datetime | None, str]:
             return None, raw
         due_date = current + timedelta(days=days)
         time_text, final_rest = _parse_time_prefix(day_match.group("rest"))
+        if time_text is None and has_invalid_time_prefix(day_match.group("rest")):
+            raise DateTimeParseError("时间格式不正确，请使用 00:00-23:59，例如 18:00。")
         time_text = time_text or "12:00"
         parsed = parse_datetime(f"{due_date.strftime('%Y-%m-%d')} {time_text}")
         return parsed, final_rest
