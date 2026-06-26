@@ -1,4 +1,4 @@
-# QQ Course Bot v1
+# tobBot v1
 
 第一版功能：
 
